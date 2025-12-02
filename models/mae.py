@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from .vit_blocks import PatchEmbed, Block
+from vit_blocks import PatchEmbed, Block
 from utils.vision import patchify
 
 class MAE(nn.Module):

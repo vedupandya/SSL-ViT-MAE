@@ -2,7 +2,7 @@ import os
 import torch
 from torch.utils.tensorboard import SummaryWriter
 from config import LOG_DIR, CKPT_DIR, TRAIN_DIR, IMG_SIZE, BATCH_SIZE, NUM_WORKERS, DEVICE, LR, WEIGHT_DECAY, EPOCHS, PATCH_SIZE, LOGGING
-from data.dataset import FlatImageDataset
+from prepare_data.dataset import FlatImageDataset
 import torchvision.transforms as T
 from models.mae import MAE, mae_loss
 from utils.vision import unpatchify, make_masked_image, apply_mae_reconstruction
@@ -94,9 +94,8 @@ def train_main():
         if LOGGING:
             writer.add_scalar('epoch/loss', avg, epoch)
 
-        save_checkpoint(os.path.join(CKPT_DIR, f'mae_checkpoint_{epoch}.pth'), epoch, model, optimizer, scaler)
-
         if (epoch + 1) % 5 == 0:    
+            save_checkpoint(os.path.join(CKPT_DIR, f'mae_checkpoint_{epoch}.pth'), epoch, model, optimizer, scaler)
             eval_acc = eval_knn(model, eval_train_loader, eval_test_loader, DEVICE)
             if LOGGING:
                 writer.add_scalar('eval/knn_acc', eval_acc, epoch)

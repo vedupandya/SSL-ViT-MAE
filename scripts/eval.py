@@ -36,7 +36,7 @@ def build_eval_dataloaders(img_size):
 
 def extract_features(mae_model, imgs, pool="mean"):
     """
-    Runs only MAE encoder forward (no decoder)
+    Runs only MAE encoder forward (no decoder). Disable grad while calling this.
     """
     # Patch embed
     x = mae_model.patch_embed(imgs)
@@ -51,10 +51,11 @@ def extract_features(mae_model, imgs, pool="mean"):
     # Pooling
     if pool == "mean":
         feat = x.mean(dim=1)
-    elif pool == "cls":
-        feat = x[:, 0]
+    # no cls token in ths mae
+    # elif pool == "cls":
+    #     feat = x[:, 0]
 
-    # Normalize (important)
+    # Normalize
     feat = torch.nn.functional.normalize(feat, dim=-1)
     return feat
 
