@@ -7,6 +7,13 @@ import torchvision.transforms as T
 from sklearn.neighbors import KNeighborsClassifier
 from models.mae import MAE         # our MAE class
 
+# --- Added path and imports for model configuration ---
+import os
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from config import MODEL_CONFIGS, DEFAULT_MODEL_SIZE
+# ------------------------------------------------------
+
 # Eval dataloaders 
 def build_eval_dataloaders(img_size):
     transform = T.Compose([
@@ -168,26 +175,36 @@ def main():
     parser.add_argument("--pool", type=str, default="mean", choices=["mean", "cls"])
     parser.add_argument("--lin_epochs", type=int, default=50)
     parser.add_argument("--img_size", type=int, default=96)
+    # --- New argument for model size ---
+    parser.add_argument('--model_size', type=str, default=DEFAULT_MODEL_SIZE, 
+                        choices=list(MODEL_CONFIGS.keys()), help='Model configuration size for checkpoint loading')
+    # -----------------------------------
 
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # --- Select Model Configuration ---
+    cfg = MODEL_CONFIGS[args.model_size]
+    # ----------------------------------
 
 
     print("Loading MAE checkpoint...")
     ckpt = torch.load(args.ckpt, map_location=device)
 
+    # --- Initialize MAE with selected configuration ---
     mae_model = MAE(
         img_size=args.img_size,
-        patch_size=16,
-        enc_dim=384,
-        enc_depth=12,
-        enc_heads=6,
-        dec_dim=192,
-        dec_depth=4,
-        dec_heads=6,
-        mask_ratio=0.25,
+        patch_size=cfg['PATCH_SIZE'],
+        enc_dim=cfg['ENC_DIM'],
+        enc_depth=cfg['ENC_DEPTH'],
+        enc_heads=cfg['ENC_HEADS'],
+        dec_dim=cfg['DEC_DIM'],
+        dec_depth=cfg['DEC_DEPTH'],
+        dec_heads=cfg['DEC_HEADS'],
+        mask_ratio=cfg['MASK_RATIO'],
     ).to(device)
+    # --------------------------------------------------
 
     mae_model.load_state_dict(ckpt["model"], strict=True)
     print("Loaded MAE.")

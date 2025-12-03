@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 
 class PatchEmbed(nn.Module):
-    def __init__(self, img_size=96, patch_size=16, in_chans=3, embed_dim=384):
+    # Updated default patch_size to 8
+    def __init__(self, img_size=96, patch_size=8, in_chans=3, embed_dim=384):
         super().__init__()
         self.img_size = img_size
         self.patch_size = patch_size

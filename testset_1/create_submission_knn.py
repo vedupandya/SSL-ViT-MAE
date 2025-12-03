@@ -19,6 +19,7 @@ import pandas as pd
 import numpy as np
 from sklearn.neighbors import KNeighborsClassifier
 import argparse
+from sklearn.linear_model import LogisticRegression # Added for Linear Probe support
 
 import os
 import sys
@@ -28,6 +29,9 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from models.mae import MAE
 from scripts.eval import extract_features
+# --- Added imports for config and model size argument parsing ---
+from config import MODEL_CONFIGS, DEFAULT_MODEL_SIZE
+# -------------------------------------------------------------
 
 torch.manual_seed(42)
 # ============================================================================
@@ -39,16 +43,34 @@ class FeatureExtractor:
     Modular feature extractor
     """
     
-    def __init__(self, model_path="mae_checkpoint.pth", device='cuda'):
+    def __init__(self, model_path="mae_checkpoint.pth", device='cuda', model_config=None):
         """
         Initialize feature extractor.
         
         Args:
             model_path: Path to trained SSL model checkpoint
             device: 'cuda' or 'cpu'
+            model_config: Dictionary containing model architecture parameters.
         """
-        print(f"Loading model: {model_path}")
-        self.model = MAE().to(device)
+        if model_config is None:
+            model_config = MODEL_CONFIGS[DEFAULT_MODEL_SIZE]
+
+        print(f"Loading model: {model_path} (Encoder Dim: {model_config.get('ENC_DIM')})...")
+        
+        # --- FIX: Initialize MAE with correct configuration from the checkpoint's size ---
+        self.model = MAE(
+            img_size=96, # Fixed size for feature extraction
+            patch_size=model_config['PATCH_SIZE'],
+            enc_dim=model_config['ENC_DIM'],
+            enc_depth=model_config['ENC_DEPTH'],
+            enc_heads=model_config['ENC_HEADS'],
+            dec_dim=model_config['DEC_DIM'],
+            dec_depth=model_config['DEC_DEPTH'],
+            dec_heads=model_config['DEC_HEADS'],
+            mask_ratio=model_config['MASK_RATIO'],
+        ).to(device)
+        # -------------------------------------------------------------------------------
+        
         self.model.load_state_dict(torch.load(model_path, map_location=device)["model"],strict=True)
         self.model.eval()
         self.model = self.model.to(device)
@@ -113,11 +135,13 @@ class ImageDataset(Dataset):
         self.image_list = image_list
         self.labels = labels
         self.resolution = resolution
+        
+        # --- FIX: Use deterministic transform for feature extraction ---
         self.transform =  T.Compose([
-            T.RandomResizedCrop(96, scale=(0.5, 1.0)),
-            T.RandomHorizontalFlip(),
+            T.Resize((resolution, resolution)), # Use deterministic resize for feature extraction
             T.ToTensor(),
         ])
+        # --------------------------------------------------------------
 
     def __len__(self):
         return len(self.image_list)
@@ -135,17 +159,6 @@ class ImageDataset(Dataset):
         return image, img_name
 
 
-# def collate_fn(batch):
-#     """Custom collate function to handle PIL images"""
-#     if len(batch[0]) == 3:  # train/val (image, label, filename)
-#         images = [item[0] for item in batch]
-#         labels = [item[1] for item in batch]
-#         filenames = [item[2] for item in batch]
-#         return images, labels, filenames
-#     else:  # test (image, filename)
-#         images = [item[0] for item in batch]
-#         filenames = [item[1] for item in batch]
-#         return images, filenames
 def collate_fn(batch):
     """
     Collate that returns:
@@ -266,7 +279,6 @@ def train_knn_classifier(train_features, train_labels, val_features, val_labels,
     print(f"  Val Accuracy: {val_acc:.4f} ({val_acc*100:.2f}%)")
     
     return classifier
-from sklearn.linear_model import LogisticRegression
 
 def train_linear_probe_classifier(train_features, train_labels,
                                   val_features, val_labels,
@@ -380,6 +392,10 @@ def main():
                         help='Inverse regularization for linear probe')
     parser.add_argument('--device', type=str, default='cuda',
                         help='Device to use (cuda or cpu)')
+    # --- New argument for model size (critical for loading correct architecture) ---
+    parser.add_argument('--model_size', type=str, default=DEFAULT_MODEL_SIZE,
+                        choices=list(MODEL_CONFIGS.keys()), help='Model configuration size for feature extraction')
+    # --------------------------------------------------------------------------------
     
     args = parser.parse_args()
     
@@ -388,6 +404,10 @@ def main():
     print(f"Using device: {device}")
     
     data_dir = Path(args.data_dir)
+    
+    # --- Load Model Configuration ---
+    cfg = MODEL_CONFIGS[args.model_size]
+    # --------------------------------
     
     # Load CSV files
     print("\nLoading dataset metadata...")
@@ -449,7 +469,9 @@ def main():
     )
     
     # Initialize feature extractor
-    feature_extractor = FeatureExtractor(args.model_path, device)
+    # --- Pass configuration to FeatureExtractor ---
+    feature_extractor = FeatureExtractor(args.model_path, device, model_config=cfg)
+    # ----------------------------------------------
     
     # Extract features
     train_features, train_labels, _ = extract_features_from_dataloader(
@@ -482,10 +504,7 @@ def main():
     print("\n" + "="*60)
     print("DONE! Now upload your submission.csv to Kaggle.")
     print("="*60)
-    # print("\nREMINDER: This baseline uses pretrained weights!")
-    # print("For the competition, you MUST train your own SSL model from scratch.")
 
 
 if __name__ == "__main__":
     main()
-

@@ -4,7 +4,8 @@ from .vit_blocks import PatchEmbed, Block
 from utils.vision import patchify
 
 class MAE(nn.Module):
-    def __init__(self, img_size=96, patch_size=16, enc_dim=384, enc_depth=12, enc_heads=6,
+    # Updated default patch_size to 8
+    def __init__(self, img_size=96, patch_size=8, enc_dim=384, enc_depth=12, enc_heads=6,
                  dec_dim=192, dec_depth=4, dec_heads=6, mask_ratio=0.75):
         super().__init__()
         self.patch_embed = PatchEmbed(img_size, patch_size, 3, enc_dim)
@@ -24,6 +25,8 @@ class MAE(nn.Module):
         self.dec_pred = nn.Linear(dec_dim, patch_size * patch_size * 3)
 
         self.patch_size = patch_size
+        self.enc_dim = enc_dim
+        self.dec_dim = dec_dim
 
     def random_masking(self, x, mask_ratio=None):
         if mask_ratio is None:
@@ -42,7 +45,7 @@ class MAE(nn.Module):
     def forward_encoder(self, imgs):
         x = self.patch_embed(imgs)
         x = x + self.encoder_pos
-        x_masked, mask, ids_keep, ids_restore = self.random_masking(x, None)
+        x_masked, mask, ids_restore = self.random_masking(x, None)
         for blk in self.enc_blocks:
             x_masked = blk(x_masked)
         latent = self.enc_norm(x_masked)
@@ -70,7 +73,8 @@ class MAE(nn.Module):
         pred = self.forward_decoder(latent, ids_restore)
         return pred, mask
 
-def mae_loss(pred, imgs, patch_size):
+# Updated default patch_size to 8
+def mae_loss(pred, imgs, patch_size=8):
     patches = patchify(imgs, patch_size)
     loss_per_patch = ((pred - patches) ** 2).mean(dim=-1)
     return loss_per_patch

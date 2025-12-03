@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 
 # Convert image to 6×6 patches
-def patchify(imgs, patch_size=16):
+def patchify(imgs, patch_size=8):
     """
     imgs: (B,3,H,W)
     return (B, N, patch_dim)
@@ -19,7 +19,7 @@ def patchify(imgs, patch_size=16):
     patches = x.reshape(B, h*w, C*p*p)
     return patches
 
-def unpatchify(patches, patch_size=16, img_size=96):
+def unpatchify(patches, patch_size=8, img_size=96):
     B, N, patch_dim = patches.shape
     C = 3
     H = W = img_size
@@ -31,7 +31,7 @@ def unpatchify(patches, patch_size=16, img_size=96):
 
 
 # Fill only the masked patches using predictions, full decoder output is in the training loop
-def apply_mae_reconstruction(imgs, pred, mask, patch_size=16):
+def apply_mae_reconstruction(imgs, pred, mask, patch_size=8):
     """
     imgs: (B,3,H,W)
     pred: (B,N,patch_dim)
@@ -54,7 +54,7 @@ def apply_mae_reconstruction(imgs, pred, mask, patch_size=16):
 
 
 # Make a masked visualization (gray patches)
-def make_masked_image(imgs, mask, patch_size=16):
+def make_masked_image(imgs, mask, patch_size=8):
     B, C, H, W = imgs.shape
     p = patch_size
 
