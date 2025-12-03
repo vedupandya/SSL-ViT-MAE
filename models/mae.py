@@ -45,7 +45,7 @@ class MAE(nn.Module):
     def forward_encoder(self, imgs):
         x = self.patch_embed(imgs)
         x = x + self.encoder_pos
-        x_masked, mask, ids_restore = self.random_masking(x, None)
+        x_masked, mask, ids_keep, ids_restore = self.random_masking(x, None)
         for blk in self.enc_blocks:
             x_masked = blk(x_masked)
         latent = self.enc_norm(x_masked)
