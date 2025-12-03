@@ -36,10 +36,7 @@ torch.manual_seed(42)
 
 class FeatureExtractor:
     """
-    Modular feature extractor - REPLACE THIS with your own SSL model!
-    
-    This example uses pretrained DINO, but for the competition you must
-    train your own model from scratch.
+    Modular feature extractor
     """
     
     def __init__(self, model_path="mae_checkpoint.pth", device='cuda'):
@@ -51,10 +48,6 @@ class FeatureExtractor:
             device: 'cuda' or 'cpu'
         """
         print(f"Loading model: {model_path}")
-        # self.transform = T.Compose([
-        #     # T.Resize((96, 96)),
-        #     T.ToTensor(),
-        # ])
         self.model = MAE().to(device)
         self.model.load_state_dict(torch.load(model_path, map_location=device)["model"],strict=True)
         self.model.eval()
@@ -71,6 +64,7 @@ class FeatureExtractor:
         Returns:
             features: numpy array of shape (feature_dim,)
         """
+        image = image.to(self.device).unsqueeze(0)  # Add batch dimension
         with torch.no_grad():
             features = extract_features(self.model, image, pool="mean")
         
@@ -87,6 +81,13 @@ class FeatureExtractor:
         Returns:
             features: numpy array of shape (batch_size, feature_dim)
         """
+        if isinstance(images, list):
+            imgs = []
+            for img in images:
+                imgs.append(img)
+            images = torch.stack(imgs, dim=0)
+        
+        images = images.to(self.device)
         with torch.no_grad():
             features = extract_features(self.model, images, pool="mean") # this fxn is already vectorized in eval.py
         
@@ -112,7 +113,12 @@ class ImageDataset(Dataset):
         self.image_list = image_list
         self.labels = labels
         self.resolution = resolution
-    
+        self.transform =  T.Compose([
+            T.RandomResizedCrop(96, scale=(0.5, 1.0)),
+            T.RandomHorizontalFlip(),
+            T.ToTensor(),
+        ])
+
     def __len__(self):
         return len(self.image_list)
     
@@ -122,25 +128,60 @@ class ImageDataset(Dataset):
         
         # Load and resize image
         image = Image.open(img_path).convert('RGB')
-        image = image.resize((self.resolution, self.resolution), Image.BILINEAR)
-        image = T.ToTensor()(image)
+        image = self.transform(image)
         
         if self.labels is not None:
-            return image, self.labels[idx], img_name
+            return image, int(self.labels[idx]), img_name
         return image, img_name
 
 
+# def collate_fn(batch):
+#     """Custom collate function to handle PIL images"""
+#     if len(batch[0]) == 3:  # train/val (image, label, filename)
+#         images = [item[0] for item in batch]
+#         labels = [item[1] for item in batch]
+#         filenames = [item[2] for item in batch]
+#         return images, labels, filenames
+#     else:  # test (image, filename)
+#         images = [item[0] for item in batch]
+#         filenames = [item[1] for item in batch]
+#         return images, filenames
 def collate_fn(batch):
-    """Custom collate function to handle PIL images"""
-    if len(batch[0]) == 3:  # train/val (image, label, filename)
-        images = [item[0] for item in batch]
-        labels = [item[1] for item in batch]
-        filenames = [item[2] for item in batch]
-        return images, labels, filenames
-    else:  # test (image, filename)
-        images = [item[0] for item in batch]
-        filenames = [item[1] for item in batch]
-        return images, filenames
+    """
+    Collate that returns:
+      - train/val: (images_tensor, labels_tensor, filenames_list)
+      - test: (images_tensor, filenames_list)
+
+    This enforces that images are batched tensors (B,3,H,W).
+    """
+    # Determine tuple length reliably
+    sample0 = batch[0]
+    if len(sample0) == 3:
+        imgs = []
+        labels = []
+        fnames = []
+        for img, lab, fname in batch:
+            # If dataset accidentally returned PIL, convert here (defensive)
+            if not isinstance(img, torch.Tensor):
+                img = T.ToTensor()(img)
+            imgs.append(img)
+            labels.append(lab)
+            fnames.append(fname)
+        images = torch.stack(imgs, dim=0)
+        labels = torch.tensor(labels, dtype=torch.long)
+        return images, labels, fnames
+
+    else:  # test set: (image, filename)
+        imgs = []
+        fnames = []
+        for item in batch:
+            img, fname = item
+            if not isinstance(img, torch.Tensor):
+                img = T.ToTensor()(img)
+            imgs.append(img)
+            fnames.append(fname)
+        images = torch.stack(imgs, dim=0)
+        return images, fnames
 
 
 # ============================================================================
@@ -170,7 +211,7 @@ def extract_features_from_dataloader(feature_extractor, dataloader, split_name='
     for batch in dataloader:
         if len(batch) == 3:  # train/val
             images, labels, filenames = batch
-            all_labels.extend(labels)
+            all_labels.extend(labels.numpy().tolist())
         else:  # test
             images, filenames = batch
         
@@ -225,6 +266,48 @@ def train_knn_classifier(train_features, train_labels, val_features, val_labels,
     print(f"  Val Accuracy: {val_acc:.4f} ({val_acc*100:.2f}%)")
     
     return classifier
+from sklearn.linear_model import LogisticRegression
+
+def train_linear_probe_classifier(train_features, train_labels,
+                                  val_features, val_labels,
+                                  C=10.0, max_iter=2000):
+    """
+    Train a linear probe (multinomial logistic regression) on features.
+
+    Args:
+        train_features: numpy array (N_train, D)
+        train_labels: list or array (N_train,)
+        val_features: numpy array (N_val, D)
+        val_labels: list or array (N_val,)
+        C: inverse regularization (larger = stronger fitting)
+        max_iter: training iterations
+
+    Returns:
+        classifier: trained sklearn model with .predict()
+    """
+    print("\nTraining Linear Probe (Logistic Regression)...")
+
+    clf = LogisticRegression(
+        penalty="l2",
+        C=C,
+        max_iter=max_iter,
+        solver="lbfgs",
+        multi_class="multinomial",
+        n_jobs=-1,
+        verbose=0
+    )
+
+    clf.fit(train_features, train_labels)
+
+    # Evaluate
+    train_acc = clf.score(train_features, train_labels)
+    val_acc = clf.score(val_features, val_labels)
+
+    print("\nLinear Probe Results:")
+    print(f"  Train Accuracy: {train_acc:.4f} ({train_acc*100:.2f}%)")
+    print(f"  Val Accuracy:   {val_acc:.4f} ({val_acc*100:.2f}%)")
+
+    return clf
 
 
 # ============================================================================
@@ -291,6 +374,10 @@ def main():
                         help='Batch size for feature extraction')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of workers for data loading')
+    parser.add_argument('--use_linear_probe', action='store_true',
+                        help='Use linear probe instead of KNN for classification')
+    parser.add_argument('--lin_C', type=float, default=10.0,
+                        help='Inverse regularization for linear probe')
     parser.add_argument('--device', type=str, default='cuda',
                         help='Device to use (cuda or cpu)')
     
@@ -340,7 +427,7 @@ def main():
     train_loader = DataLoader(
         train_dataset, 
         batch_size=args.batch_size,
-        shuffle=False, 
+        shuffle=True, 
         num_workers=args.num_workers,
         collate_fn=collate_fn
     )
@@ -362,7 +449,7 @@ def main():
     )
     
     # Initialize feature extractor
-    feature_extractor = FeatureExtractor(model_name=args.model_path, device=device)
+    feature_extractor = FeatureExtractor(args.model_path, device)
     
     # Extract features
     train_features, train_labels, _ = extract_features_from_dataloader(
@@ -375,12 +462,19 @@ def main():
         feature_extractor, test_loader, 'test'
     )
     
-    # Train KNN classifier
-    classifier = train_knn_classifier(
-        train_features, train_labels,
-        val_features, val_labels,
-        k=args.k
-    )
+    if args.use_linear_probe:
+        classifier = train_linear_probe_classifier(
+            train_features, train_labels,
+            val_features, val_labels,
+            C=args.lin_C
+        )
+    else:
+        # Train KNN classifier
+        classifier = train_knn_classifier(
+            train_features, train_labels,
+            val_features, val_labels,
+            k=args.k
+        )
     
     # Create submission
     create_submission(test_features, test_filenames, classifier, args.output)

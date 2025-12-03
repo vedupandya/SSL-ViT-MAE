@@ -96,9 +96,11 @@ def train_main():
 
         if (epoch + 1) % 5 == 0:    
             save_checkpoint(os.path.join(CKPT_DIR, f'mae_checkpoint_{epoch}.pth'), epoch, model, optimizer, scaler)
-            eval_acc = eval_knn(model, eval_train_loader, eval_test_loader, DEVICE)
+            # eval_acc = eval_knn(model, eval_train_loader, eval_test_loader, DEVICE)
+            eval_acc = eval_linear_probe(model, eval_train_loader, eval_test_loader, DEVICE, lin_epochs=15)
             if LOGGING:
-                writer.add_scalar('eval/knn_acc', eval_acc, epoch)
+                # writer.add_scalar('eval/knn_acc', eval_acc, epoch)
+                writer.add_scalar('eval/lp_acc', eval_acc, epoch)
 
     if LOGGING:
         writer.close()

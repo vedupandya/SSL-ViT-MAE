@@ -1,11 +1,11 @@
 import torch
 import torch.nn as nn
-from vit_blocks import PatchEmbed, Block
+from .vit_blocks import PatchEmbed, Block
 from utils.vision import patchify
 
 class MAE(nn.Module):
     def __init__(self, img_size=96, patch_size=16, enc_dim=384, enc_depth=12, enc_heads=6,
-                 dec_dim=192, dec_depth=4, dec_heads=6, mask_ratio=0.25):
+                 dec_dim=192, dec_depth=4, dec_heads=6, mask_ratio=0.75):
         super().__init__()
         self.patch_embed = PatchEmbed(img_size, patch_size, 3, enc_dim)
         self.num_patches = self.patch_embed.num_patches
