@@ -188,7 +188,7 @@ def main():
 
     args = parser.parse_args()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
     
     # --- Select Model Configuration ---
     cfg = MODEL_CONFIGS[args.model_size]
