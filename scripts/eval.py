@@ -101,6 +101,9 @@ def eval_knn(mae_model, train_loader, test_loader, device, pool="mean"):
 
     acc = knn.score(test_feats, test_labels)
     print(f"★ k-NN accuracy: {acc:.4f}")
+    for param in mae_model.parameters():
+        param.requires_grad = True
+    mae_model.train()
     return acc
 
 
@@ -165,6 +168,9 @@ def eval_linear_probe(mae_model, train_loader, test_loader, device,
 
     acc = correct / total
     print(f"★ Linear probe accuracy: {acc:.4f}")
+    for param in mae_model.parameters():
+        param.requires_grad = True
+    mae_model.train()
     return acc
 
 
