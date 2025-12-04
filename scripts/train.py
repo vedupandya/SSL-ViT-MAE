@@ -141,6 +141,10 @@ def train_main():
             if LOGGING:
                 # writer.add_scalar('eval/knn_acc', eval_acc, epoch)
                 writer.add_scalar('eval/lp_acc', eval_acc, epoch)
+            # Unfreeze all model parameters after pretraining for evaluation    
+            for param in model.parameters():
+                param.requires_grad = True
+            model.train()
 
     if LOGGING:
         writer.close()
