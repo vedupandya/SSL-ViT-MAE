@@ -2,14 +2,6 @@
 Create Kaggle Submission with KNN Classifier
 =============================================
 
-This script provides a simple baseline using:
-- Pretrained DINO model for feature extraction
-- KNN classifier for predictions
-
-NOTE: This is a BASELINE example. For the competition, you MUST:
-- Train your own SSL model from scratch (no pretrained weights!)
-- This script is just to understand the submission format
-
 Usage:
     python create_submission_knn.py \
         --data_dir ./kaggle_data \
@@ -19,40 +11,67 @@ Usage:
 
 import torch
 import torch.nn as nn
+import torchvision.transforms as T
 from torch.utils.data import Dataset, DataLoader
-from transformers import AutoImageProcessor, Dinov2Model
 from PIL import Image
 from pathlib import Path
 import pandas as pd
 import numpy as np
-from tqdm import tqdm
 from sklearn.neighbors import KNeighborsClassifier
 import argparse
+from sklearn.linear_model import LogisticRegression # Added for Linear Probe support
 
+import os
+import sys
 
+# Allow imports from project root
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+
+from models.mae import MAE
+from scripts.eval import extract_features
+# --- Added imports for config and model size argument parsing ---
+from config import MODEL_CONFIGS, DEFAULT_MODEL_SIZE
+# -------------------------------------------------------------
+
+torch.manual_seed(42)
 # ============================================================================
 #                          MODEL SECTION (Modular)
 # ============================================================================
 
 class FeatureExtractor:
     """
-    Modular feature extractor - REPLACE THIS with your own SSL model!
-    
-    This example uses pretrained DINO, but for the competition you must
-    train your own model from scratch.
+    Modular feature extractor
     """
     
-    def __init__(self, model_name='facebook/webssl-dino300m-full2b-224', device='cuda'):
+    def __init__(self, model_path="mae_checkpoint.pth", device='cuda', model_config=None):
         """
         Initialize feature extractor.
         
         Args:
-            model_name: HuggingFace model name (for baseline only!)
+            model_path: Path to trained SSL model checkpoint
             device: 'cuda' or 'cpu'
+            model_config: Dictionary containing model architecture parameters.
         """
-        print(f"Loading model: {model_name}")
-        self.processor = AutoImageProcessor.from_pretrained(model_name)
-        self.model = Dinov2Model.from_pretrained(model_name)
+        if model_config is None:
+            model_config = MODEL_CONFIGS[DEFAULT_MODEL_SIZE]
+
+        print(f"Loading model: {model_path} (Encoder Dim: {model_config.get('ENC_DIM')})...")
+        
+        # --- FIX: Initialize MAE with correct configuration from the checkpoint's size ---
+        self.model = MAE(
+            img_size=96, # Fixed size for feature extraction
+            patch_size=model_config['PATCH_SIZE'],
+            enc_dim=model_config['ENC_DIM'],
+            enc_depth=model_config['ENC_DEPTH'],
+            enc_heads=model_config['ENC_HEADS'],
+            dec_dim=model_config['DEC_DIM'],
+            dec_depth=model_config['DEC_DEPTH'],
+            dec_heads=model_config['DEC_HEADS'],
+            mask_ratio=model_config['MASK_RATIO'],
+        ).to(device)
+        # -------------------------------------------------------------------------------
+        
+        self.model.load_state_dict(torch.load(model_path, map_location=device)["model"],strict=True)
         self.model.eval()
         self.model = self.model.to(device)
         self.device = device
@@ -67,23 +86,12 @@ class FeatureExtractor:
         Returns:
             features: numpy array of shape (feature_dim,)
         """
-        # Process image
-        inputs = self.processor(images=image, return_tensors="pt")
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        
-        # Extract features
-        # Please keep the model backbone frozen for the competition!
+        image = image.to(self.device).unsqueeze(0)  # Add batch dimension
         with torch.no_grad():
-            outputs = self.model(**inputs)
+            features = extract_features(self.model, image, pool="mean")
         
-        # Use CLS token features
-        cls_features = outputs.last_hidden_state[:, 0]  # Shape: (1, feature_dim)
+        return features.cpu().numpy()
         
-        # Alternative: use mean of patch features
-        # patch_features = outputs.last_hidden_state[:, 1:]
-        # features = patch_features.mean(dim=1)
-        
-        return cls_features.cpu().numpy()[0]
     
     def extract_batch_features(self, images):
         """
@@ -95,19 +103,17 @@ class FeatureExtractor:
         Returns:
             features: numpy array of shape (batch_size, feature_dim)
         """
-        # Process batch
-        inputs = self.processor(images=images, return_tensors="pt")
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        if isinstance(images, list):
+            imgs = []
+            for img in images:
+                imgs.append(img)
+            images = torch.stack(imgs, dim=0)
         
-        # Extract features
-        # Please keep the model backbone frozen for the competition!
+        images = images.to(self.device)
         with torch.no_grad():
-            outputs = self.model(**inputs)
+            features = extract_features(self.model, images, pool="mean") # this fxn is already vectorized in eval.py
         
-        # Use CLS token features
-        cls_features = outputs.last_hidden_state[:, 0]
-        
-        return cls_features.cpu().numpy()
+        return features.cpu().numpy()
 
 
 # ============================================================================
@@ -117,7 +123,7 @@ class FeatureExtractor:
 class ImageDataset(Dataset):
     """Simple dataset for loading images"""
     
-    def __init__(self, image_dir, image_list, labels=None, resolution=224):
+    def __init__(self, image_dir, image_list, labels=None, resolution=96):
         """
         Args:
             image_dir: Directory containing images
@@ -129,7 +135,14 @@ class ImageDataset(Dataset):
         self.image_list = image_list
         self.labels = labels
         self.resolution = resolution
-    
+        
+        # --- FIX: Use deterministic transform for feature extraction ---
+        self.transform =  T.Compose([
+            T.Resize((resolution, resolution)), # Use deterministic resize for feature extraction
+            T.ToTensor(),
+        ])
+        # --------------------------------------------------------------
+
     def __len__(self):
         return len(self.image_list)
     
@@ -139,24 +152,49 @@ class ImageDataset(Dataset):
         
         # Load and resize image
         image = Image.open(img_path).convert('RGB')
-        image = image.resize((self.resolution, self.resolution), Image.BILINEAR)
+        image = self.transform(image)
         
         if self.labels is not None:
-            return image, self.labels[idx], img_name
+            return image, int(self.labels[idx]), img_name
         return image, img_name
 
 
 def collate_fn(batch):
-    """Custom collate function to handle PIL images"""
-    if len(batch[0]) == 3:  # train/val (image, label, filename)
-        images = [item[0] for item in batch]
-        labels = [item[1] for item in batch]
-        filenames = [item[2] for item in batch]
-        return images, labels, filenames
-    else:  # test (image, filename)
-        images = [item[0] for item in batch]
-        filenames = [item[1] for item in batch]
-        return images, filenames
+    """
+    Collate that returns:
+      - train/val: (images_tensor, labels_tensor, filenames_list)
+      - test: (images_tensor, filenames_list)
+
+    This enforces that images are batched tensors (B,3,H,W).
+    """
+    # Determine tuple length reliably
+    sample0 = batch[0]
+    if len(sample0) == 3:
+        imgs = []
+        labels = []
+        fnames = []
+        for img, lab, fname in batch:
+            # If dataset accidentally returned PIL, convert here (defensive)
+            if not isinstance(img, torch.Tensor):
+                img = T.ToTensor()(img)
+            imgs.append(img)
+            labels.append(lab)
+            fnames.append(fname)
+        images = torch.stack(imgs, dim=0)
+        labels = torch.tensor(labels, dtype=torch.long)
+        return images, labels, fnames
+
+    else:  # test set: (image, filename)
+        imgs = []
+        fnames = []
+        for item in batch:
+            img, fname = item
+            if not isinstance(img, torch.Tensor):
+                img = T.ToTensor()(img)
+            imgs.append(img)
+            fnames.append(fname)
+        images = torch.stack(imgs, dim=0)
+        return images, fnames
 
 
 # ============================================================================
@@ -183,10 +221,10 @@ def extract_features_from_dataloader(feature_extractor, dataloader, split_name='
     
     print(f"\nExtracting features from {split_name} set...")
     
-    for batch in tqdm(dataloader, desc=f"{split_name} features"):
+    for batch in dataloader:
         if len(batch) == 3:  # train/val
             images, labels, filenames = batch
-            all_labels.extend(labels)
+            all_labels.extend(labels.numpy().tolist())
         else:  # test
             images, filenames = batch
         
@@ -241,6 +279,47 @@ def train_knn_classifier(train_features, train_labels, val_features, val_labels,
     print(f"  Val Accuracy: {val_acc:.4f} ({val_acc*100:.2f}%)")
     
     return classifier
+
+def train_linear_probe_classifier(train_features, train_labels,
+                                  val_features, val_labels,
+                                  C=10.0, max_iter=2000):
+    """
+    Train a linear probe (multinomial logistic regression) on features.
+
+    Args:
+        train_features: numpy array (N_train, D)
+        train_labels: list or array (N_train,)
+        val_features: numpy array (N_val, D)
+        val_labels: list or array (N_val,)
+        C: inverse regularization (larger = stronger fitting)
+        max_iter: training iterations
+
+    Returns:
+        classifier: trained sklearn model with .predict()
+    """
+    print("\nTraining Linear Probe (Logistic Regression)...")
+
+    clf = LogisticRegression(
+        penalty="l2",
+        C=C,
+        max_iter=max_iter,
+        solver="lbfgs",
+        multi_class="multinomial",
+        n_jobs=-1,
+        verbose=0
+    )
+
+    clf.fit(train_features, train_labels)
+
+    # Evaluate
+    train_acc = clf.score(train_features, train_labels)
+    val_acc = clf.score(val_features, val_labels)
+
+    print("\nLinear Probe Results:")
+    print(f"  Train Accuracy: {train_acc:.4f} ({train_acc*100:.2f}%)")
+    print(f"  Val Accuracy:   {val_acc:.4f} ({val_acc*100:.2f}%)")
+
+    return clf
 
 
 # ============================================================================
@@ -297,9 +376,8 @@ def main():
                         help='Root directory containing train/val/test folders')
     parser.add_argument('--output', type=str, default='submission.csv',
                         help='Output path for submission file')
-    parser.add_argument('--model_name', type=str, 
-                        default='facebook/webssl-dino300m-full2b-224',
-                        help='HuggingFace model name (baseline only!)')
+    parser.add_argument('--model_path', type=str, default='mae_checkpoint.pth',
+                        help='Path to trained SSL model checkpoint')
     parser.add_argument('--resolution', type=int, default=96,
                         help='Image resolution (96 for competition, 224 for DINO)')
     parser.add_argument('--k', type=int, default=5,
@@ -308,8 +386,16 @@ def main():
                         help='Batch size for feature extraction')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of workers for data loading')
+    parser.add_argument('--use_linear_probe', action='store_true',
+                        help='Use linear probe instead of KNN for classification')
+    parser.add_argument('--lin_C', type=float, default=10.0,
+                        help='Inverse regularization for linear probe')
     parser.add_argument('--device', type=str, default='cuda',
                         help='Device to use (cuda or cpu)')
+    # --- New argument for model size (critical for loading correct architecture) ---
+    parser.add_argument('--model_size', type=str, default=DEFAULT_MODEL_SIZE,
+                        choices=list(MODEL_CONFIGS.keys()), help='Model configuration size for feature extraction')
+    # --------------------------------------------------------------------------------
     
     args = parser.parse_args()
     
@@ -318,6 +404,10 @@ def main():
     print(f"Using device: {device}")
     
     data_dir = Path(args.data_dir)
+    
+    # --- Load Model Configuration ---
+    cfg = MODEL_CONFIGS[args.model_size]
+    # --------------------------------
     
     # Load CSV files
     print("\nLoading dataset metadata...")
@@ -357,7 +447,7 @@ def main():
     train_loader = DataLoader(
         train_dataset, 
         batch_size=args.batch_size,
-        shuffle=False, 
+        shuffle=True, 
         num_workers=args.num_workers,
         collate_fn=collate_fn
     )
@@ -379,7 +469,9 @@ def main():
     )
     
     # Initialize feature extractor
-    feature_extractor = FeatureExtractor(model_name=args.model_name, device=device)
+    # --- Pass configuration to FeatureExtractor ---
+    feature_extractor = FeatureExtractor(args.model_path, device, model_config=cfg)
+    # ----------------------------------------------
     
     # Extract features
     train_features, train_labels, _ = extract_features_from_dataloader(
@@ -392,12 +484,19 @@ def main():
         feature_extractor, test_loader, 'test'
     )
     
-    # Train KNN classifier
-    classifier = train_knn_classifier(
-        train_features, train_labels,
-        val_features, val_labels,
-        k=args.k
-    )
+    if args.use_linear_probe:
+        classifier = train_linear_probe_classifier(
+            train_features, train_labels,
+            val_features, val_labels,
+            C=args.lin_C
+        )
+    else:
+        # Train KNN classifier
+        classifier = train_knn_classifier(
+            train_features, train_labels,
+            val_features, val_labels,
+            k=args.k
+        )
     
     # Create submission
     create_submission(test_features, test_filenames, classifier, args.output)
@@ -405,10 +504,7 @@ def main():
     print("\n" + "="*60)
     print("DONE! Now upload your submission.csv to Kaggle.")
     print("="*60)
-    print("\nREMINDER: This baseline uses pretrained weights!")
-    print("For the competition, you MUST train your own SSL model from scratch.")
 
 
 if __name__ == "__main__":
     main()
-
