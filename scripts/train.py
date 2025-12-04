@@ -22,14 +22,16 @@ def train_main():
     parser = argparse.ArgumentParser(description='MAE Pretraining')
     parser.add_argument('--model_size', type=str, default=DEFAULT_MODEL_SIZE, 
                         choices=list(MODEL_CONFIGS.keys()), help='Model configuration size')
-    parser.add_argument('--epochs', type=int, default=EPOCHS, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=BATCH_SIZE, help='Batch size for training')
+    parser.add_argument('--epochs', type=int, help='Number of training epochs')
+    parser.add_argument('--batch_size', type=int, help='Batch size for training')
     args = parser.parse_args()
 
     # --- Select Model Configuration ---
     cfg = MODEL_CONFIGS[args.model_size]
-    BATCH_SIZE = args.batch_size
-    EPOCHS = args.epochs
+    if args.epochs is not None:
+        EPOCHS = args.epochs
+    if args.batch_size is not None:
+        BATCH_SIZE = args.batch_size
     # Extract training-specific hyperparams
     LR = cfg['LR']*BATCH_SIZE/256
     WEIGHT_DECAY = cfg['WEIGHT_DECAY']
