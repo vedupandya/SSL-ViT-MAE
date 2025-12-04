@@ -44,7 +44,7 @@ CONFIG_BASE = {
     'DEC_DEPTH': 8,        # Increased decoder depth
     'DEC_HEADS': 12,
     'MASK_RATIO': 0.75,
-    'LR': 6.0e-4,          # Scaled LR for 1024 batch size
+    'LR': 1.5e-4,          # Scale LR for 1024 batch size
     'WEIGHT_DECAY': 0.05,
 }
 
