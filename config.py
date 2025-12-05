@@ -16,7 +16,7 @@ DEVICE = "cuda" if __import__('torch').cuda.is_available() else "cpu"
 LOGGING = True
 EPOCHS = 200
 LP_BATCH = 256
-LP_EPOCHS = 10
+LP_EPOCHS = 5
 
 # --- Model Configurations (Architecture and Hyperparameters) ---
 

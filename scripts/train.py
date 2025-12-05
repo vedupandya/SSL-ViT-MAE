@@ -17,7 +17,7 @@ import torchvision.transforms as T
 from models.mae import MAE, mae_loss
 from utils.vision import unpatchify, apply_mae_reconstruction
 from utils.checkpoint import latest_checkpoint, save_checkpoint, load_checkpoint
-from eval import build_eval_dataloaders, eval_linear_probe, eval_knn
+from eval import build_eval_dataloaders, eval_linear_probe, eval_knn, logistic_regression_probe
 
 torch.manual_seed(42)
 
