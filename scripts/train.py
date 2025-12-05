@@ -21,62 +21,33 @@ from eval import build_eval_dataloaders, eval_linear_probe, eval_knn
 
 torch.manual_seed(42)
 
-# --- Multi-Node DDP Setup Function ---
+# --- DDP SETUP/CLEANUP (Multi-Node Compatible) ---
 def setup(local_rank):
-    """
-    Initialize the distributed environment using Slurm environment variables.
-    This function sets MASTER_ADDR, MASTER_PORT, WORLD_SIZE, and GLOBAL_RANK.
-    """
+    """Initializes distributed environment using Slurm variables."""
     
-    # 1. Check for Slurm environment variables
-    if 'SLURM_NTASKS' not in os.environ:
-        # Fallback for local debugging (single-GPU training)
-        world_size = torch.cuda.device_count()
-        if world_size == 0: world_size = 1 # CPU fallback
-        
-        master_addr = 'localhost'
-        gpus_per_node = world_size
-        node_rank = 0
-        
-        os.environ['MASTER_ADDR'] = master_addr
-        os.environ['MASTER_PORT'] = '12355'
-        global_rank = local_rank
-    
-    else:
-        # Slurm environment detected (Multi-node or Multi-GPU)
-        
-        # Get total number of processes (GPUs) and number of nodes
-        world_size = int(os.environ['SLURM_NTASKS'])
-        gpus_per_node = int(os.environ['SLURM_GPUS_ON_NODE'])
-        node_rank = int(os.environ['SLURM_NODEID'])
-        
-        # Retrieve the master hostname (first node in the job allocation)
-        try:
-            hostnames = subprocess.check_output(['scontrol', 'show', 'hostnames', os.environ['SLURM_JOB_NODELIST']]).decode().split()
-            master_addr = hostnames[0]
-        except Exception as e:
-            # Fallback for safety, though should work on standard Slurm
-            print(f"Error fetching master hostname via scontrol: {e}. Using localhost as fallback.")
-            master_addr = 'localhost'
-        
-        # Calculate Global Rank: position within all GPUs
-        global_rank = node_rank * gpus_per_node + local_rank
-        
-        # Set Environment Variables
-        os.environ['MASTER_ADDR'] = master_addr
-        os.environ['MASTER_PORT'] = '12355' # Consistent port
-        os.environ['WORLD_SIZE'] = str(world_size)
+    if 'SLURM_NTASKS' not in os.environ or int(os.environ['SLURM_NTASKS']) <= 1:
+        # Should not be called in single-GPU mode now, but included for robustness
+        raise RuntimeError("Setup called in invalid DDP context.")
 
-    # 2. Initialize Process Group
-    if torch.cuda.is_available():
-        torch.cuda.set_device(local_rank)
-        dist.init_process_group("nccl", rank=global_rank, world_size=world_size)
-        
-        if global_rank == 0:
-            print(f"[DDP Init] World Size: {world_size}, Master: {master_addr}")
-    else:
-        # CPU initialization (rarely used for training)
-        dist.init_process_group("gloo", rank=global_rank, world_size=world_size)
+    world_size = int(os.environ['SLURM_NTASKS'])
+    gpus_per_node = int(os.environ['SLURM_GPUS_ON_NODE'])
+    node_rank = int(os.environ['SLURM_NODEID'])
+    
+    # Retrieve the master hostname
+    hostnames = subprocess.check_output(['scontrol', 'show', 'hostnames', os.environ['SLURM_JOB_NODELIST']]).decode().split()
+    master_addr = hostnames[0]
+    
+    global_rank = node_rank * gpus_per_node + local_rank
+    
+    os.environ['MASTER_ADDR'] = master_addr
+    os.environ['MASTER_PORT'] = '12355' 
+    os.environ['WORLD_SIZE'] = str(world_size)
+
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group("nccl", rank=global_rank, world_size=world_size)
+    
+    if global_rank == 0:
+        print(f"[DDP Init] World Size: {world_size}, Master: {master_addr}")
 
     return global_rank, world_size, gpus_per_node
 
@@ -85,10 +56,14 @@ def cleanup():
     if dist.is_initialized():
         dist.destroy_process_group()
 
+# --- TRAINING WORKER FUNCTION ---
 def train_worker(global_rank, world_size, local_rank, gpus_per_node, args):
     """
     Main training function run by each GPU process.
     """
+    
+    # Check if running in DDP mode or Single-GPU mode
+    is_ddp = dist.is_initialized()
     
     # 1. Configuration Setup
     cfg = MODEL_CONFIGS[args.model_size]
@@ -118,8 +93,11 @@ def train_worker(global_rank, world_size, local_rank, gpus_per_node, args):
         mask_ratio=cfg['MASK_RATIO'],
     ).to(local_rank)
     
-    # Wrap the model with DDP
-    model = DDP(raw_model, device_ids=[local_rank])
+    # Wrap the model with DDP only if we are in DDP mode
+    if is_ddp:
+        model = DDP(raw_model, device_ids=[local_rank])
+    else:
+        model = raw_model
 
     # 3. Data Loading
     transform = T.Compose([
@@ -130,13 +108,19 @@ def train_worker(global_rank, world_size, local_rank, gpus_per_node, args):
 
     dataset = FlatImageDataset(TRAIN_DIR, transform)
     
-    # CRITICAL DDP CHANGE: Use DistributedSampler
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=global_rank, shuffle=True)
+    if is_ddp:
+        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=global_rank, shuffle=True)
+        shuffle = False
+        batch_size = BATCH_SIZE // world_size
+    else:
+        sampler = None
+        shuffle = True
+        batch_size = BATCH_SIZE # Use global batch size (1024 for small, 2048 for base)
 
     loader = torch.utils.data.DataLoader(
         dataset, 
-        batch_size=BATCH_SIZE // world_size, # Divide global batch size by total GPUs
-        shuffle=False, # Shuffle handled by sampler
+        batch_size=batch_size, 
+        shuffle=shuffle,
         num_workers=NUM_WORKERS, 
         pin_memory=True, 
         prefetch_factor=2,
@@ -146,30 +130,51 @@ def train_worker(global_rank, world_size, local_rank, gpus_per_node, args):
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     scaler = torch.amp.GradScaler(device='cuda')
 
-    # 4. Resume Training (Only Rank 0 handles checkpoint logic)
+    # 4. Resume Training
     start_epoch = 0
-    if global_rank == 0:
+    latest = None
+    is_master = (global_rank == 0)
+
+    if is_master:
         os.makedirs(LOG_DIR, exist_ok=True)
         os.makedirs(ckpt_dir_path, exist_ok=True)
         latest = latest_checkpoint(ckpt_dir_path)
-        if latest:
-            # Note: We load into the raw_model, not the DDP-wrapped 'model'
-            start_epoch = load_checkpoint(str(latest), raw_model, optimizer, scaler, map_location=f'cuda:{local_rank}') + 1
-            print(f'Resuming from {latest} on global rank {global_rank}')
+    
+    # Only broadcast if DDP is active
+    if is_ddp:
+        latest_path_tensor = torch.tensor([1.0], device=local_rank) if latest else torch.tensor([0.0], device=local_rank)
+        dist.broadcast(latest_path_tensor, src=0)
+    
+    # Load Checkpoint on ALL active ranks (including single-GPU)
+    if (latest and is_master) or (is_ddp and latest_path_tensor.item() > 0):
+        
+        if is_ddp and global_rank != 0:
+             latest = latest_checkpoint(ckpt_dir_path)
+             
+        # ALL ranks load the state dictionary
+        start_epoch = load_checkpoint(str(latest), raw_model, optimizer, scaler, map_location=f'cuda:{local_rank}') + 1
+        print(f'Resuming from {latest} on global rank {global_rank}. Starting at Epoch {start_epoch}')
+        
+        # Manually ensure the LR is correct
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = LR
+            
+    if is_ddp:
+        dist.barrier() # Ensure all processes sync after loading checkpoints
 
-    dist.barrier() # Ensure all processes sync after loading checkpoints
-
-    # 5. Training Loop (Only Rank 0 handles TensorBoard)
-    if global_rank == 0 and LOGGING:
+    # 5. Training Loop
+    if is_master and LOGGING:
         writer = SummaryWriter(LOG_DIR)
         
     eval_train_loader, eval_test_loader = None, None
-    if global_rank == 0:
+    if is_master:
         eval_train_loader, eval_test_loader = build_eval_dataloaders(IMG_SIZE)
 
 
     for epoch in range(start_epoch, EPOCHS):
-        sampler.set_epoch(epoch) # Critical for DDP shuffling
+        if is_ddp:
+            sampler.set_epoch(epoch) 
+
         model.train()
         total_loss = 0.0
         
@@ -177,7 +182,7 @@ def train_worker(global_rank, world_size, local_rank, gpus_per_node, args):
             imgs = batch[0].to(local_rank)
             optimizer.zero_grad()
 
-            pred, mask = raw_model(imgs) # Use raw_model inside the forward pass
+            pred, mask = raw_model(imgs) 
             
             per_patch = mae_loss(pred, imgs, cfg['PATCH_SIZE'])
             loss = (per_patch * mask.float()).sum() / mask.float().sum()
@@ -188,15 +193,15 @@ def train_worker(global_rank, world_size, local_rank, gpus_per_node, args):
 
             total_loss += loss.item()
             
-            # Logging and checkpointing only happens on rank 0
-            if global_rank == 0 and LOGGING:
+            # Logging only happens on master process
+            if is_master and LOGGING:
                 global_step = epoch * len(loader) + step
                 writer.add_scalar('step/loss', loss.item(), global_step)
 
-                if global_step > 0 and global_step % 10000 == 0:
+                if global_step > 0 and global_step % 1000 == 0:
                     model.eval()
                     with torch.no_grad():
-                        x = imgs[:4].cpu() # Use a few images from the current GPU
+                        x = imgs[:4].cpu() 
                         pred_raw, mask_raw = raw_model(imgs[:4].to(local_rank))
                         
                         rec = apply_mae_reconstruction(imgs[:4].to(local_rank), pred_raw, mask_raw, patch_size=cfg['PATCH_SIZE']).cpu()
@@ -206,68 +211,73 @@ def train_worker(global_rank, world_size, local_rank, gpus_per_node, args):
                         writer.add_images(f"Reconstruction/step_{global_step}", grid, global_step)
                     model.train()
 
-        # Gather loss from all ranks 
-        total_loss_tensor = torch.tensor([total_loss], device=local_rank)
-        dist.all_reduce(total_loss_tensor, op=dist.ReduceOp.SUM)
-        avg = (total_loss_tensor.item() / world_size) / len(loader)
+        # Loss Aggregation
+        if is_ddp:
+            total_loss_tensor = torch.tensor([total_loss], device=local_rank)
+            dist.all_reduce(total_loss_tensor, op=dist.ReduceOp.SUM)
+            avg = (total_loss_tensor.item() / world_size) / len(loader)
+        else:
+            avg = total_loss / len(loader)
 
-        if global_rank == 0:
+
+        if is_master:
             print(f'Epoch {epoch} avg loss {avg:.5f}')
             if LOGGING:
                 writer.add_scalar('epoch/loss', avg, epoch)
 
-            save_checkpoint(os.path.join(ckpt_dir_path, f'mae_checkpoint_{epoch}.pth'), epoch, raw_model, optimizer, scaler)
+            if (epoch + 1) % 5 == 0:    
+                save_checkpoint(os.path.join(ckpt_dir_path, f'mae_checkpoint_{epoch}.pth'), epoch, raw_model, optimizer, scaler)
                 
-            if (epoch + 1) % 10 == 0:    
                 # Evaluation
                 eval_acc = eval_linear_probe(raw_model, eval_train_loader, eval_test_loader, local_rank, lin_epochs=LP_EPOCHS)
                 if LOGGING:
                     writer.add_scalar('eval/lp_acc', eval_acc, epoch)
+            
+        if is_ddp:
+            dist.barrier() # Ensure all processes sync before starting next epoch
 
-    if global_rank == 0 and LOGGING:
+
+    if is_master and LOGGING:
         writer.close()
         
-    cleanup()
+    if is_ddp:
+        cleanup()
 
 
 def main():
     parser = argparse.ArgumentParser(description='MAE Pretraining')
     parser.add_argument('--model_size', type=str, default=DEFAULT_MODEL_SIZE, 
                         choices=list(MODEL_CONFIGS.keys()), help='Model configuration size')
-    parser.add_argument('--epochs', type=int, default=200, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=1024, help='Global batch size across all GPUs')
     args = parser.parse_args()
     
-    # --- Multi-Node Launch Logic ---
-    if 'SLURM_NTASKS' in os.environ and int(os.environ['SLURM_NTASKS']) > 0:
-        # Running via srun/sbatch (HPC DDP)
+    # 1. Check Execution Environment
+    if 'SLURM_NTASKS' in os.environ and int(os.environ['SLURM_NTASKS']) > 1:
+        # --- Multi-GPU / Multi-Node DDP (SLURM) ---
         
-        world_size = int(os.environ['SLURM_NTASKS'])
-        gpus_per_node = int(os.environ['SLURM_GPUS_ON_NODE'])
-        
-        if world_size > gpus_per_node:
-            print(f"Starting Multi-Node DDP training with {world_size} tasks across {os.environ['SLURM_NNODES']} nodes...")
-        else:
-            print(f"Starting Single-Node DDP training with {world_size} GPUs...")
-
-        # Slurm sets SLURM_LOCALID for us (0, 1, 2, 3...)
+        # Slurm sets SLURM_LOCALID (our local_rank) and we need to call setup
         local_rank = int(os.environ['SLURM_LOCALID'])
         
-        global_rank, world_size, _ = setup(local_rank)
+        global_rank, world_size, gpus_per_node = setup(local_rank)
         
         train_worker(global_rank, world_size, local_rank, gpus_per_node, args)
         
     else:
-        # Fallback for local debugging (non-Slurm environment, uses mp.spawn)
-        world_size = torch.cuda.device_count()
-        if world_size > 0:
-            print(f"Starting local DDP training with {world_size} GPUs (DEBUG MODE)...")
-            mp.spawn(train_worker, args=(world_size, world_size, world_size, args,), nprocs=world_size, join=True)
+        # --- Single-GPU / CPU Execution (No DDP) ---
+        
+        world_size = 1 
+        local_rank = 0 
+        global_rank = 0
+        gpus_per_node = 1
+        
+        if torch.cuda.is_available():
+            print("Starting single-GPU training (No DDP initialization).")
+            torch.cuda.set_device(local_rank) 
+            train_worker(global_rank, world_size, local_rank, gpus_per_node, args)
         else:
-            print("No GPUs found. Running on CPU (not recommended for training).")
-            # Run single CPU process
-            train_worker(0, 1, 0, 1, args)
-        cleanup()
+            print("Starting single-CPU training (No GPUs available).")
+            # If no GPU, call the worker on CPU device 0
+            train_worker(global_rank, world_size, 0, gpus_per_node, args)
+
 
 if __name__ == '__main__':
     main()
