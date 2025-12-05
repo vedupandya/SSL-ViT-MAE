@@ -248,6 +248,8 @@ def main():
     parser = argparse.ArgumentParser(description='MAE Pretraining')
     parser.add_argument('--model_size', type=str, default=DEFAULT_MODEL_SIZE, 
                         choices=list(MODEL_CONFIGS.keys()), help='Model configuration size')
+    parser.add_argument('--epochs', type=int, default=200, help='Number of training epochs')
+    parser.add_argument('--batch_size', type=int, default=1024, help='Global batch size across all GPUs')
     args = parser.parse_args()
     
     # 1. Check Execution Environment
