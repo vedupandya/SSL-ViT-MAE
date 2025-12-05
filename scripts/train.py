@@ -92,6 +92,12 @@ def train_worker(global_rank, world_size, local_rank, gpus_per_node, args):
     
     # 1. Configuration Setup
     cfg = MODEL_CONFIGS[args.model_size]
+
+    global EPOCHS, BATCH_SIZE
+    if args.epochs:
+        EPOCHS = args.epochs
+    if args.batch_size:
+        BATCH_SIZE = args.batch_size
     LR = cfg['LR']*BATCH_SIZE/256
     WEIGHT_DECAY = cfg['WEIGHT_DECAY']
     
@@ -209,7 +215,7 @@ def train_worker(global_rank, world_size, local_rank, gpus_per_node, args):
             print(f'Epoch {epoch} avg loss {avg:.5f}')
             if LOGGING:
                 writer.add_scalar('epoch/loss', avg, epoch)
-                
+
             save_checkpoint(os.path.join(ckpt_dir_path, f'mae_checkpoint_{epoch}.pth'), epoch, raw_model, optimizer, scaler)
                 
             if (epoch + 1) % 5 == 0:    
@@ -228,6 +234,8 @@ def main():
     parser = argparse.ArgumentParser(description='MAE Pretraining')
     parser.add_argument('--model_size', type=str, default=DEFAULT_MODEL_SIZE, 
                         choices=list(MODEL_CONFIGS.keys()), help='Model configuration size')
+    parser.add_argument('--epochs', type=int, default=200, help='Number of training epochs')
+    parser.add_argument('--batch_size', type=int, default=1024, help='Global batch size across all GPUs')
     args = parser.parse_args()
     
     # --- Multi-Node Launch Logic ---
