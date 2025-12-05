@@ -218,7 +218,7 @@ def train_worker(global_rank, world_size, local_rank, gpus_per_node, args):
 
             save_checkpoint(os.path.join(ckpt_dir_path, f'mae_checkpoint_{epoch}.pth'), epoch, raw_model, optimizer, scaler)
                 
-            if (epoch + 1) % 5 == 0:    
+            if (epoch + 1) % 10 == 0:    
                 # Evaluation
                 eval_acc = eval_linear_probe(raw_model, eval_train_loader, eval_test_loader, local_rank, lin_epochs=LP_EPOCHS)
                 if LOGGING:
