@@ -140,44 +140,70 @@ def train_worker(global_rank, world_size, local_rank, gpus_per_node, args):
 
     # Dictionary to hold states loaded from disk (only necessary for Rank 0)
     map_location = {'cuda:0': f'cuda:{local_rank}'}
-    
+    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu") 
     # Find checkpoint path and broadcast existence
     if is_master:
         os.makedirs(LOG_DIR, exist_ok=True)
         os.makedirs(ckpt_dir_path, exist_ok=True)
         latest = latest_checkpoint(ckpt_dir_path)
         
-    latest_exists = torch.tensor(1, device=local_rank) if latest else torch.tensor(0, device=local_rank)
-    
+    # Broadcast whether latest exists (0/1)
+    flag = torch.tensor([1 if latest else 0], dtype=torch.int64, device=device)
     if is_ddp:
-        dist.broadcast(latest_exists, src=0)
-    
-    if latest_exists.item() == 1:
-        # 4a. --- I/O Phase: Only Rank 0 loads the full state ---
+        dist.broadcast(flag, src=0)
+    has_ckpt = bool(flag.item())
+
+    if has_ckpt:
+        # --- Rank 0: load checkpoint to CPU (robust across machines) ---
         if is_master:
-            # Load full checkpoint dictionary
-            ckpt = torch.load(str(latest), map_location=map_location)
-            
-            # --- Load States (Model, Opt, Scaler) ---
-            # NOTE: We load into the non-DDP raw_model and optimizer on Rank 0
-            raw_model.load_state_dict(ckpt['model'], strict=True)
-            optimizer.load_state_dict(ckpt['opt'])
-            scaler.load_state_dict(ckpt['scaler'])
-            start_epoch = ckpt.get('epoch', 0) + 1
-            
-            # Manually ensure the LR is correct after loading the optimizer state
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = LR
-            
-            print(f'Resuming from {latest} on global rank {global_rank}. Starting at Epoch {start_epoch}')
-            
-        # 4b. --- Synchronization Phase: Broadcast Model Weights ---
-        # CRITICAL FIX: The entire raw_model state dict is broadcast from Rank 0 
-        # to all other ranks to ensure uniform weight initialization.
+            start_epoch = load_checkpoint(latest, raw_model, optimizer, scaler, map_location='cpu') + 1
+
+            # move model parameters to device (rank0)
+            raw_model.to(device)
+            # ensure optimizer param_groups lr matches computed LR
+            for pg in optimizer.param_groups:
+                pg['lr'] = LR
+
+        # --- All ranks: synchronize start_epoch ---
+        epoch_t = torch.tensor([start_epoch], dtype=torch.int64, device=device)
         if is_ddp:
-            dist.barrier() # Ensure all ranks are ready before syncing weights
-            dist.broadcast(raw_model.state_dict(), src=0)
-            
+            dist.broadcast(epoch_t, src=0)
+        start_epoch = int(epoch_t.item())
+
+        # --- Broadcast model parameters (tensor-by-tensor) ---
+        if is_ddp:
+            dist.barrier()
+            for param in raw_model.state_dict().values():
+                # param is a tensor on CPU for master; ensure on device for broadcast
+                # we must move param to device before broadcasting on non-master ranks
+                if not param.is_cuda:
+                    param.data = param.data.to(device)
+                dist.broadcast(param, src=0)
+            dist.barrier()
+
+            # --- Broadcast optimizer state tensors (if any) ---
+            # optimizer.state is mapping param->state; each state value is dict of tensors and scalars
+            opt_state = optimizer.state_dict()
+            # iterate over states and broadcast tensor entries
+            for state in opt_state['state'].values():
+                for k, v in state.items():
+                    if torch.is_tensor(v):
+                        # ensure tensor on device then broadcast in-place
+                        if not v.is_cuda:
+                            v = v.to(device)
+                        dist.broadcast(v, src=0)
+
+            # After we modified the tensor objects above, load back into optimizer
+            # (re-apply the possibly-updated opt_state)
+            # Note: PyTorch optimizer.state_dict() returns new objects; safer approach:
+            # just call optimizer.load_state_dict(opt_state) on all ranks; keys align.
+            optimizer.load_state_dict(opt_state)
+            dist.barrier()
+        else:
+            # single gpu: ensure model on device
+            raw_model.to(device)
+
+
     # 5. --- Final DDP Initialization ---
     if is_ddp:
         # Wrap the model AFTER weights have been loaded and synchronized
