@@ -73,7 +73,18 @@ def train_worker(global_rank, world_size, local_rank, gpus_per_node, args):
         EPOCHS = args.epochs
     if args.batch_size:
         BATCH_SIZE = args.batch_size
-    LR = cfg['LR']*BATCH_SIZE/256
+
+    LR_linear = cfg['LR']*BATCH_SIZE/256
+
+    if BATCH_SIZE > 1024:
+        # Scale LR by sqrt(B_new / B_old) / (B_new / B_old) => dampening factor.
+        # A simple method is to use half the linear scaled LR.
+        LR = LR_linear * 0.5 
+        print(f"Applying conservative LR scaling: LR reduced from {LR_linear:.5f} to {LR:.5f}")
+    else:
+        # Use linear scaling for smaller, safer global batch sizes
+        LR = LR_linear
+        
     WEIGHT_DECAY = cfg['WEIGHT_DECAY']
     
     # Checkpoint directory for this model size
