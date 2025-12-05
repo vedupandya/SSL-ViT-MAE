@@ -4,7 +4,6 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 import torchvision
 import torchvision.transforms as T
-from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import KNeighborsClassifier
 from models.mae import MAE         # our MAE class
 
@@ -36,8 +35,8 @@ def build_eval_dataloaders(img_size):
         transform=transform
     )
 
-    train_loader = DataLoader(train_set, batch_size=256, shuffle=True, num_workers=4)
-    test_loader = DataLoader(test_set, batch_size=256, shuffle=False, num_workers=4)
+    train_loader = DataLoader(train_set, batch_size=256, shuffle=True, num_workers=2)
+    test_loader = DataLoader(test_set, batch_size=256, shuffle=False, num_workers=2)
     return train_loader, test_loader
 
 
@@ -67,57 +66,7 @@ def extract_features(mae_model, imgs, pool="mean"):
     feat = torch.nn.functional.normalize(feat, dim=-1)
     return feat
 
-def logistic_regression_probe(mae_model, train_loader, val_loader, device, C=20.0, max_iter=1000, pool="mean"):
 
-    print("\nTraining Linear Probe (Logistic Regression)...")
-    mae_model.eval()
-    for p in mae_model.parameters():
-        p.requires_grad = False
-
-    print("Extracting train features...")
-    train_feats, train_labels = [], []
-    for imgs, labels in train_loader:
-        imgs = imgs.to(device)
-        feats = extract_features(mae_model, imgs, pool)
-        train_feats.append(feats.cpu())
-        train_labels.append(labels)
-
-    train_feats = torch.cat(train_feats).numpy()
-    train_labels = torch.cat(train_labels).numpy()
-
-    val_features, val_labels = [], []
-    for imgs, labels in val_loader:
-        imgs = imgs.to(device)
-        feats = extract_features(mae_model, imgs, pool)
-        val_features.append(feats.cpu())
-        val_labels.append(labels)
-
-    val_features = torch.cat(val_features).numpy()
-    val_labels = torch.cat(val_labels).numpy()
-    clf = LogisticRegression(
-        penalty="l2",
-        C=C,
-        max_iter=max_iter,
-        solver="lbfgs",
-        multi_class="multinomial",
-        n_jobs=-1,
-        verbose=0
-    )
-
-    clf.fit(train_feats, train_labels)
-
-    # Evaluate
-    train_acc = clf.score(train_feats, train_labels)
-    val_acc = clf.score(val_features, val_labels)
-
-    print("\nLinear Probe Results:")
-    print(f"  Train Accuracy: {train_acc:.4f} ({train_acc*100:.2f}%)")
-    print(f"  Val Accuracy:   {val_acc:.4f} ({val_acc*100:.2f}%)")
-
-    for param in mae_model.parameters():
-        param.requires_grad = True
-    mae_model.train()
-    return val_acc
 
 def eval_knn(mae_model, train_loader, test_loader, device, pool="mean"):
     mae_model.eval()
@@ -171,7 +120,7 @@ def eval_linear_probe(mae_model, train_loader, test_loader, device,
     optimizer = torch.optim.AdamW(classifier.parameters(), lr=1e-3, weight_decay=0.005)
     loss_fn = nn.CrossEntropyLoss()
 
-    print("Training linear classifier...")
+    print(f"Training linear classifier on device: {device}...")
 
 
     for epoch in range(lin_epochs):

@@ -17,7 +17,7 @@ import torchvision.transforms as T
 from models.mae import MAE, mae_loss
 from utils.vision import unpatchify, apply_mae_reconstruction
 from utils.checkpoint import latest_checkpoint, save_checkpoint, load_checkpoint
-from eval import build_eval_dataloaders, eval_linear_probe, eval_knn, logistic_regression_probe
+from eval import build_eval_dataloaders, eval_linear_probe, eval_knn
 
 torch.manual_seed(42)
 
@@ -73,18 +73,7 @@ def train_worker(global_rank, world_size, local_rank, gpus_per_node, args):
         EPOCHS = args.epochs
     if args.batch_size:
         BATCH_SIZE = args.batch_size
-
-    LR_linear = cfg['LR']*BATCH_SIZE/256
-
-    if BATCH_SIZE > 1024:
-        # Scale LR by sqrt(B_new / B_old) / (B_new / B_old) => dampening factor.
-        # A simple method is to use half the linear scaled LR.
-        LR = LR_linear * 0.5 
-        print(f"Applying conservative LR scaling: LR reduced from {LR_linear:.5f} to {LR:.5f}")
-    else:
-        # Use linear scaling for smaller, safer global batch sizes
-        LR = LR_linear
-        
+    LR = cfg['LR']*BATCH_SIZE/256
     WEIGHT_DECAY = cfg['WEIGHT_DECAY']
     
     # Checkpoint directory for this model size
@@ -104,11 +93,14 @@ def train_worker(global_rank, world_size, local_rank, gpus_per_node, args):
         mask_ratio=cfg['MASK_RATIO'],
     ).to(local_rank)
     
-    # Wrap the model with DDP only if we are in DDP mode
-    if is_ddp:
-        model = DDP(raw_model, device_ids=[local_rank])
-    else:
-        model = raw_model
+    # --------------------------------------------------------------------------
+    # NOTE: DDP wrapper MUST happen AFTER loading weights, BUT before the training loop.
+    # We will instantiate the DDP model only after the weights are loaded into raw_model.
+    
+    # Placeholder for DDP model until weights are loaded
+    model = raw_model
+    # --------------------------------------------------------------------------
+
 
     # 3. Data Loading
     transform = T.Compose([
@@ -126,7 +118,7 @@ def train_worker(global_rank, world_size, local_rank, gpus_per_node, args):
     else:
         sampler = None
         shuffle = True
-        batch_size = BATCH_SIZE # Use global batch size (1024 for small, 2048 for base)
+        batch_size = BATCH_SIZE
 
     loader = torch.utils.data.DataLoader(
         dataset, 
@@ -138,41 +130,60 @@ def train_worker(global_rank, world_size, local_rank, gpus_per_node, args):
         sampler=sampler
     )
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    optimizer = torch.optim.AdamW(raw_model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     scaler = torch.amp.GradScaler(device='cuda')
 
-    # 4. Resume Training
+    # 4. Resume Training (Final Optimized DDP Resume Logic)
     start_epoch = 0
     latest = None
     is_master = (global_rank == 0)
 
+    # Dictionary to hold states loaded from disk (only necessary for Rank 0)
+    map_location = {'cuda:0': f'cuda:{local_rank}'}
+    
+    # Find checkpoint path and broadcast existence
     if is_master:
         os.makedirs(LOG_DIR, exist_ok=True)
         os.makedirs(ckpt_dir_path, exist_ok=True)
         latest = latest_checkpoint(ckpt_dir_path)
+        
+    latest_exists = torch.tensor(1, device=local_rank) if latest else torch.tensor(0, device=local_rank)
     
-    # Only broadcast if DDP is active
     if is_ddp:
-        latest_path_tensor = torch.tensor([1.0], device=local_rank) if latest else torch.tensor([0.0], device=local_rank)
-        dist.broadcast(latest_path_tensor, src=0)
+        dist.broadcast(latest_exists, src=0)
     
-    # Load Checkpoint on ALL active ranks (including single-GPU)
-    if (latest and is_master) or (is_ddp and latest_path_tensor.item() > 0):
-        
-        if is_ddp and global_rank != 0:
-             latest = latest_checkpoint(ckpt_dir_path)
-             
-        # ALL ranks load the state dictionary
-        start_epoch = load_checkpoint(str(latest), raw_model, optimizer, scaler, map_location=f'cuda:{local_rank}') + 1
-        print(f'Resuming from {latest} on global rank {global_rank}. Starting at Epoch {start_epoch}')
-        
-        # Manually ensure the LR is correct
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = LR
+    if latest_exists.item() == 1:
+        # 4a. --- I/O Phase: Only Rank 0 loads the full state ---
+        if is_master:
+            # Load full checkpoint dictionary
+            ckpt = torch.load(str(latest), map_location=map_location)
             
+            # --- Load States (Model, Opt, Scaler) ---
+            # NOTE: We load into the non-DDP raw_model and optimizer on Rank 0
+            raw_model.load_state_dict(ckpt['model'], strict=True)
+            optimizer.load_state_dict(ckpt['opt'])
+            scaler.load_state_dict(ckpt['scaler'])
+            start_epoch = ckpt.get('epoch', 0) + 1
+            
+            # Manually ensure the LR is correct after loading the optimizer state
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = LR
+            
+            print(f'Resuming from {latest} on global rank {global_rank}. Starting at Epoch {start_epoch}')
+            
+        # 4b. --- Synchronization Phase: Broadcast Model Weights ---
+        # CRITICAL FIX: The entire raw_model state dict is broadcast from Rank 0 
+        # to all other ranks to ensure uniform weight initialization.
+        if is_ddp:
+            dist.barrier() # Ensure all ranks are ready before syncing weights
+            dist.broadcast(raw_model.state_dict(), src=0)
+            
+    # 5. --- Final DDP Initialization ---
     if is_ddp:
-        dist.barrier() # Ensure all processes sync after loading checkpoints
-
+        # Wrap the model AFTER weights have been loaded and synchronized
+        model = DDP(raw_model, device_ids=[local_rank])
+    else:
+        model = raw_model # Use the simple model wrapper
     # 5. Training Loop
     if is_master and LOGGING:
         writer = SummaryWriter(LOG_DIR)
@@ -236,8 +247,8 @@ def train_worker(global_rank, world_size, local_rank, gpus_per_node, args):
             if LOGGING:
                 writer.add_scalar('epoch/loss', avg, epoch)
 
+            save_checkpoint(os.path.join(ckpt_dir_path, f'mae_checkpoint_{epoch}.pth'), epoch, raw_model, optimizer, scaler)
             if (epoch + 1) % 5 == 0:    
-                save_checkpoint(os.path.join(ckpt_dir_path, f'mae_checkpoint_{epoch}.pth'), epoch, raw_model, optimizer, scaler)
                 
                 # Evaluation
                 eval_acc = eval_linear_probe(raw_model, eval_train_loader, eval_test_loader, local_rank, lin_epochs=LP_EPOCHS)
@@ -259,8 +270,6 @@ def main():
     parser = argparse.ArgumentParser(description='MAE Pretraining')
     parser.add_argument('--model_size', type=str, default=DEFAULT_MODEL_SIZE, 
                         choices=list(MODEL_CONFIGS.keys()), help='Model configuration size')
-    parser.add_argument('--epochs', type=int, default=200, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=1024, help='Global batch size across all GPUs')
     args = parser.parse_args()
     
     # 1. Check Execution Environment
