@@ -2,3 +2,5 @@
 /.vscode
 *__pycache__/
 /testset_2/*
+/testset_3/data
+/testset_3/raw_data

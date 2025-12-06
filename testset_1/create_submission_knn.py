@@ -201,9 +201,9 @@ def collate_fn(batch):
 #                          FEATURE EXTRACTION
 # ============================================================================
 
-def extract_features_from_dataloader(feature_extractor, dataloader, split_name='train'):
+def extract_features_from_dataloader(feature_extractor, dataloader, split_name='train',val_dataloader=None):
     """
-    Extract features from a dataloader.
+    Extract features from a dataloader. If val is provided, also extract from val and combine with train for final classifier training.
     
     Args:
         feature_extractor: FeatureExtractor instance
@@ -232,6 +232,16 @@ def extract_features_from_dataloader(feature_extractor, dataloader, split_name='
         features = feature_extractor.extract_batch_features(images)
         all_features.append(features)
         all_filenames.extend(filenames)
+    
+    if val_dataloader is not None:
+        # Also extract from val_dataloader if provided
+        for batch in val_dataloader:
+            images, labels, filenames = batch
+            all_labels.extend(labels.numpy().tolist())
+            # Extract features for batch
+            features = feature_extractor.extract_batch_features(images)
+            all_features.append(features)
+            all_filenames.extend(filenames)
     
     features = np.concatenate(all_features, axis=0)
     labels = all_labels if all_labels else None
@@ -483,17 +493,18 @@ def main():
     test_features, _, test_filenames = extract_features_from_dataloader(
         feature_extractor, test_loader, 'test'
     )
-    
+    final_train_features = np.concatenate([train_features, val_features], axis=0)
+    final_train_labels = train_labels + val_labels
     if args.use_linear_probe:
         classifier = train_linear_probe_classifier(
-            train_features, train_labels,
+            final_train_features, final_train_labels,
             val_features, val_labels,
             C=args.lin_C
         )
     else:
         # Train KNN classifier
         classifier = train_knn_classifier(
-            train_features, train_labels,
+            final_train_features, final_train_labels,
             val_features, val_labels,
             k=args.k
         )
