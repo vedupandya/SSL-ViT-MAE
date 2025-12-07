@@ -400,6 +400,8 @@ def main():
                         help='Use linear probe instead of KNN for classification')
     parser.add_argument('--lin_C', type=float, default=10.0,
                         help='Inverse regularization for linear probe')
+    parser.add_argument('--max_iter', type=int, default=2000,
+                        help='Max iterations for linear probe training')
     parser.add_argument('--device', type=str, default='cuda',
                         help='Device to use (cuda or cpu)')
     # --- New argument for model size (critical for loading correct architecture) ---
@@ -499,7 +501,7 @@ def main():
         classifier = train_linear_probe_classifier(
             final_train_features, final_train_labels,
             val_features, val_labels,
-            C=args.lin_C
+            C=args.lin_C,max_iter=args.max_iter
         )
     else:
         # Train KNN classifier

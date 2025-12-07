@@ -392,6 +392,8 @@ def main():
                         help='Inverse regularization for linear probe')
     parser.add_argument('--device', type=str, default='cuda',
                         help='Device to use (cuda or cpu)')
+    parser.add_argument('--max_iter', type=int, default=2000,
+                        help='Max iterations for linear probe training')
     # --- New argument for model size (critical for loading correct architecture) ---
     parser.add_argument('--model_size', type=str, default=DEFAULT_MODEL_SIZE,
                         choices=list(MODEL_CONFIGS.keys()), help='Model configuration size for feature extraction')
@@ -488,7 +490,7 @@ def main():
         classifier = train_linear_probe_classifier(
             train_features, train_labels,
             val_features, val_labels,
-            C=args.lin_C
+            C=args.lin_C,max_iter=args.max_iter
         )
     else:
         # Train KNN classifier
