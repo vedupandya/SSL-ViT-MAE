@@ -326,7 +326,7 @@ def train_linear_probe_classifier(train_features, train_labels,
 #                          SUBMISSION CREATION
 # ============================================================================
 
-def create_submission(test_features, test_filenames, classifier, output_path):
+def create_submission(test_features, test_filenames, classifier, output_path, num_classes):
     """
     Create submission.csv for Kaggle.
     
@@ -335,6 +335,7 @@ def create_submission(test_features, test_filenames, classifier, output_path):
         test_filenames: List of test image filenames
         classifier: Trained KNN classifier
         output_path: Path to save submission.csv
+        num_classes: Number of classes in the classification task
     """
     print("\nGenerating predictions on test set...")
     predictions = classifier.predict(test_features)
@@ -361,7 +362,7 @@ def create_submission(test_features, test_filenames, classifier, output_path):
     print(f"\nValidating submission format...")
     assert list(submission_df.columns) == ['id', 'class_id'], "Invalid columns!"
     assert submission_df['class_id'].min() >= 0, "Invalid class_id < 0"
-    assert submission_df['class_id'].max() <= 199, "Invalid class_id > 199"
+    assert submission_df['class_id'].max() < num_classes, f"Invalid class_id > {num_classes-1}"
     assert submission_df.isnull().sum().sum() == 0, "Missing values found!"
     print("✓ Submission format is valid!")
 
@@ -398,6 +399,7 @@ def main():
     # --------------------------------------------------------------------------------
     
     args = parser.parse_args()
+    
     
     # Check device
     device = args.device if torch.cuda.is_available() else 'cpu'
@@ -471,7 +473,6 @@ def main():
     # Initialize feature extractor
     # --- Pass configuration to FeatureExtractor ---
     feature_extractor = FeatureExtractor(args.model_path, device, model_config=cfg)
-    # ----------------------------------------------
     
     # Extract features
     train_features, train_labels, _ = extract_features_from_dataloader(
@@ -498,8 +499,11 @@ def main():
             k=args.k
         )
     
+    # Get number of classes
+    num_classes = train_df['class_id'].nunique()
+    
     # Create submission
-    create_submission(test_features, test_filenames, classifier, args.output)
+    create_submission(test_features, test_filenames, classifier, args.output, num_classes)
     
     print("\n" + "="*60)
     print("DONE! Now upload your submission.csv to Kaggle.")
@@ -508,3 +512,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
