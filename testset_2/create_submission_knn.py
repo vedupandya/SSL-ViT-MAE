@@ -325,7 +325,7 @@ def train_linear_probe_classifier(train_features, train_labels,
     classifier = LogisticRegression(
         penalty="l2",
         C=best_C,
-        max_iter=2000,
+        max_iter=max_iter,
         solver="lbfgs",
         multi_class="multinomial",
         n_jobs=-1
