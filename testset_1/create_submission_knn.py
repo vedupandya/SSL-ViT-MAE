@@ -495,9 +495,10 @@ def main():
     test_features, _, test_filenames = extract_features_from_dataloader(
         feature_extractor, test_loader, 'test'
     )
-    final_train_features = np.concatenate([train_features, val_features], axis=0)
-    final_train_labels = train_labels + val_labels
+    
     if args.use_linear_probe:
+        final_train_features = np.concatenate([train_features, val_features], axis=0)
+        final_train_labels = train_labels + val_labels
         classifier = train_linear_probe_classifier(
             final_train_features, final_train_labels,
             val_features, val_labels,
@@ -506,7 +507,7 @@ def main():
     else:
         # Train KNN classifier
         classifier = train_knn_classifier(
-            final_train_features, final_train_labels,
+            train_features, train_labels,
             val_features, val_labels,
             k=args.k
         )
