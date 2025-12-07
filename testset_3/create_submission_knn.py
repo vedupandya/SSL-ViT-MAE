@@ -488,8 +488,10 @@ def main():
     )
     
     if args.use_linear_probe:
+        final_train_features = np.concatenate([train_features, val_features], axis=0)
+        final_train_labels = train_labels + val_labels
         classifier = train_linear_probe_classifier(
-            train_features, train_labels,
+            final_train_features, final_train_labels,
             val_features, val_labels,
             C=args.lin_C,max_iter=args.max_iter
         )
