@@ -329,7 +329,7 @@ def train_linear_probe_classifier(train_features, train_labels,
         n_jobs=-1
     )
     classifier.fit(final_train_features, final_train_labels)
-
+    return classifier
 
 
 # ============================================================================
