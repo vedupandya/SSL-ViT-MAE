@@ -297,29 +297,38 @@ def train_linear_probe_classifier(train_features, train_labels,
     Returns:
         classifier: trained sklearn model with .predict()
     """
-    print("\nTraining Linear Probe (Logistic Regression)...")
+    # 1. Hyperparam selection using train->val only
+    best_val = -1
+    best_C = None
+    for C in [0.1, 1, 3, 10, 20]:
+        clf = LogisticRegression(
+            penalty="l2",
+            C=C,
+            max_iter=max_iter,
+            solver="lbfgs",
+            multi_class="multinomial",
+            n_jobs=-1
+        )
+        clf.fit(train_features, train_labels)
+        val_acc = clf.score(val_features, val_labels)
+        print("C:", C, "val acc:", val_acc)
+        if val_acc > best_val:
+            best_val = val_acc
+            best_C = C
 
-    clf = LogisticRegression(
+    # 2. Retrain using train + val
+    final_train_features = np.concatenate([train_features, val_features], axis=0)
+    final_train_labels = train_labels + val_labels
+
+    classifier = LogisticRegression(
         penalty="l2",
-        C=C,
-        max_iter=max_iter,
+        C=best_C,
+        max_iter=2000,
         solver="lbfgs",
         multi_class="multinomial",
-        n_jobs=-1,
-        verbose=0
+        n_jobs=-1
     )
-
-    clf.fit(train_features, train_labels)
-
-    # Evaluate
-    train_acc = clf.score(train_features, train_labels)
-    val_acc = clf.score(val_features, val_labels)
-
-    print("\nLinear Probe Results:")
-    print(f"  Train Accuracy: {train_acc:.4f} ({train_acc*100:.2f}%)")
-    print(f"  Val Accuracy:   {val_acc:.4f} ({val_acc*100:.2f}%)")
-
-    return clf
+    classifier.fit(final_train_features, final_train_labels)
 
 
 # ============================================================================
@@ -487,10 +496,8 @@ def main():
     )
     
     if args.use_linear_probe:
-        final_train_features = np.concatenate([train_features, val_features], axis=0)
-        final_train_labels = train_labels + val_labels
         classifier = train_linear_probe_classifier(
-            final_train_features, final_train_labels,
+            train_features, train_labels,
             val_features, val_labels,
             C=args.lin_C,max_iter=args.max_iter
         )
